@@ -1,58 +1,41 @@
-# I Built a Real-Time AI Code Reviewer in TypeScript — Here's the Full Source Code
+# I Built a Real-Time AI Code Reviewer in TypeScript — Every Line Explained
 
-## A deep dive into building a Monaco-powered editor with Groq AI, live preview, and a GitHub PR bot
-
----
-
-Every developer knows the loop: push code, wait for CI, scroll through reviewer comments about that `var` you used or the null check you forgot. What if your code could review itself — *while you're still writing it*?
-
-I built **AI Code Reviewer** — a TypeScript app that analyzes your code in real time as you type, shows a live preview for HTML/CSS, and auto-reviews GitHub Pull Requests with one-click fixes.
-
-Here's every line of TypeScript that makes it work.
-
-> **Live demo:** [realtime-code-reviewer.vercel.app](https://realtime-code-reviewer.vercel.app)
-> **Source:** [github.com/doyalnitin/ai-code-reviewer](https://github.com/doyalnitin/ai-code-reviewer)
+*A Monaco-powered editor that reviews your code as you type, renders live HTML previews, and auto-reviews GitHub Pull Requests — built with Groq AI, Next.js 16, and strict TypeScript throughout.*
 
 ---
 
-## The Architecture
+I got tired of pushing code, waiting 10 minutes for CI, and then reading reviewer comments about bugs I could have caught while typing.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         CLIENT (React 19)                           │
-│                                                                     │
-│  ┌─────────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │  Monaco Editor   │  │ Live Preview │  │    AI Review Panel     │ │
-│  │  (TypeScript)    │  │  (iframe)    │  │  (cards + apply fix)   │ │
-│  └────────┬────────┘  └──────────────┘  └───────────┬────────────┘ │
-│           │                                          │              │
-│           └──────────── debounce 800ms ──────────────┘              │
-│                              │                                      │
-│                              ▼                                      │
-│                    POST /api/review                                 │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                        SERVER (Next.js 16)                           │
-│                                                                      │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐    │
-│  │  Groq SDK     │────▶│  Llama 3.1   │────▶│  JSON Response   │    │
-│  │  (TypeScript) │     │  (AI Model)  │     │  (ReviewIssue[]) │    │
-│  └──────────────┘     └──────────────┘     └──────────────────┘    │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │              GitHub Webhook (Optional)                        │   │
-│  │  Webhook → Parse Diff → AI Review → Post PR Comments         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────┘
-```
+So I built a tool that catches them *while you type*.
+
+It's called **AI Code Reviewer**. You write code in a Monaco editor (the same engine behind VS Code), and an AI instantly tells you about bugs, security issues, and performance problems — with a button to fix each one in one click.
+
+I also built a GitHub bot that does the same thing automatically on every Pull Request.
+
+Everything is written in TypeScript. No `any` types. No shortcuts. Here's how every piece works.
+
+> **Try it live:** [realtime-code-reviewer.vercel.app](https://realtime-code-reviewer.vercel.app)
+> **Source code:** [github.com/doyalnitin/ai-code-reviewer](https://github.com/doyalnitin/ai-code-reviewer)
 
 ---
 
-## 1. The Type System — Foundation of Everything
+## The Big Picture
 
-Every great TypeScript project starts with well-defined types. Here's the `ReviewIssue` interface that flows through the entire app:
+The app has three panels side by side:
+
+On the left is a full Monaco code editor. In the middle (or as a tab) is a live preview that renders HTML/CSS in real time. On the right is the AI review panel showing issues as color-coded cards.
+
+The flow is simple: you type, the app waits 800 milliseconds for you to stop, then sends your code to Groq's Llama 3.1 model. The AI returns a JSON array of issues. Each issue gets displayed as a card in the review panel and as an inline marker in the editor.
+
+Click "Apply Fix" and the problematic line gets replaced instantly.
+
+There's also a GitHub webhook endpoint that does the same thing automatically when someone opens or updates a Pull Request. It fetches the diff, runs AI analysis on each changed file, and posts review comments directly on the PR.
+
+---
+
+## Starting With Types
+
+Every TypeScript project should start here. The `ReviewIssue` interface is the data contract that flows through the entire application — from the AI prompt to the API response to the editor markers to the UI cards.
 
 ```typescript
 // lib/reviewer.ts
@@ -66,13 +49,17 @@ export interface ReviewIssue {
 }
 ```
 
-This single interface drives the AI prompt, the API response, the Monaco editor markers, the review cards, and the Apply Fix button. Change the type here, and the entire pipeline updates.
+This single interface drives everything. The AI is prompted to return JSON matching this schema. The API route returns `ReviewIssue[]`. The editor component maps each issue to a Monaco marker. The review panel renders each issue as a card.
+
+If you want to add a field — say, a `category` or `confidence` score — you change it here and the entire pipeline adapts. That's the power of starting with types.
 
 ---
 
-## 2. The AI Engine — Groq + Llama 3.1
+## The AI Engine
 
-The AI integration is clean and type-safe. Groq gives us sub-second responses, making the "real-time" experience actually feel real-time.
+I chose Groq because it's fast. Llama 3.1 responds in under a second, which makes the "real-time" experience actually feel real-time. No loading spinners, no lag.
+
+The integration is 30 lines of TypeScript:
 
 ```typescript
 // lib/reviewer.ts
@@ -86,7 +73,8 @@ export async function analyzeCode(
   language: string
 ): Promise<ReviewIssue[]> {
   const systemPrompt = `You are an expert real-time code reviewer.
-Analyze the provided code for logic bugs, security risks, syntax errors, and performance issues.
+Analyze the provided code for logic bugs, security risks,
+syntax errors, and performance issues.
 You MUST output ONLY a JSON array matching this exact schema:
 [
   {
@@ -113,11 +101,13 @@ You MUST output ONLY a JSON array matching this exact schema:
 }
 ```
 
-**Key insight:** The `response_format: { type: "json_object" }` parameter forces Groq to return valid JSON. No regex parsing, no text extraction — just structured data we can use directly.
+The key detail is `response_format: { type: "json_object" }`. This tells Groq to return valid JSON, not free-form text. That means I don't need regex parsing or text extraction. The response goes straight from `JSON.parse` to `ReviewIssue[]`.
+
+The prompt asks the AI to output issues with `lineNumber`, `severity`, `title`, `message`, and `suggestion`. The `lineNumber` is relative to the code chunk it receives — we'll handle the mapping later.
 
 ---
 
-## 3. The API Route — Thin Server Layer
+## The API Route
 
 The review endpoint is intentionally thin. It validates input and delegates to the AI:
 
@@ -149,13 +139,17 @@ export async function POST(req: Request) {
 }
 ```
 
+No business logic here. Just validation and delegation. The AI does the heavy lifting.
+
 ---
 
-## 4. The Monaco Editor Component — Where It All Comes Together
+## The Editor Component
 
-This is the heart of the app. A 370-line TypeScript component that manages the editor, AI review, live preview, and one-click fixes.
+This is the heart of the app. A single React component that manages the Monaco editor, the AI review, the live preview, and the one-click fix feature.
 
-### Type Definitions and Constants
+### Setting Up Types and Constants
+
+First, the language configuration and severity styling:
 
 ```typescript
 // components/CodeEditor.tsx
@@ -173,60 +167,77 @@ const LANGUAGES = [
 
 type Severity = "error" | "warning" | "info";
 
-const SEVERITY_CONFIG: Record<Severity, {
-  color: string;
-  bg: string;
-  border: string;
-  badge: string;
-  icon: string;
-}> = {
+const SEVERITY_CONFIG: Record<
+  Severity,
+  { color: string; bg: string; border: string; badge: string; icon: string }
+> = {
   error: {
     color: "text-red-400",
     bg: "bg-red-500/10",
     border: "border-red-500",
     badge: "bg-red-500/20 text-red-300",
-    icon: "!"
+    icon: "!",
   },
   warning: {
     color: "text-amber-400",
     bg: "bg-amber-500/10",
     border: "border-amber-500",
     badge: "bg-amber-500/20 text-amber-300",
-    icon: "!"
+    icon: "!",
   },
   info: {
     color: "text-blue-400",
     bg: "bg-blue-500/10",
     border: "border-blue-500",
     badge: "bg-blue-500/20 text-blue-300",
-    icon: "i"
+    icon: "i",
   },
 };
 ```
 
-### State Management with useRef for Editor Instances
+The `as const` on `LANGUAGES` gives us literal types. When you select a language, TypeScript knows exactly which values are valid.
+
+### State and Refs
+
+The component uses `useRef` for Monaco editor instances (they persist across renders without causing re-renders) and `useState` for app state:
 
 ```typescript
 export default function CodeEditor() {
-  // Editor refs — typed with Monaco's interfaces
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const previewRef = useRef<HTMLIFrameElement | null>(null);
 
-  // App state
   const [language, setLanguage] = useState<string>("javascript");
   const [issues, setIssues] = useState<ReviewIssue[]>([]);
   const [loading, setLoading] = useState(false);
   const [code, setCode] = useState<string>(DEFAULT_CODE[language]);
   const [activeTab, setActiveTab] = useState<"review" | "preview">("review");
 
-  // Debounce ref — avoids re-creating on every render
   const debouncedReviewRef = useRef<ReturnType<typeof debounce> | null>(null);
 ```
 
-### The Debounced Review Function
+The `debouncedReviewRef` is important. If I created the debounced function inside the component body, it would be recreated on every render, defeating the debounce. Storing it in a ref means it persists across renders.
 
-This is the key to making it "real-time" without hammering the API:
+### The Review Pipeline
+
+Here's the core flow. When the user types, `handleCodeChange` updates the code state and triggers the debounced review:
+
+```typescript
+  const handleCodeChange = (val: string | undefined) => {
+    const newCode = val || "";
+    setCode(newCode);
+    getDebouncedReview()(newCode, language);
+  };
+
+  const getDebouncedReview = () => {
+    if (!debouncedReviewRef.current) {
+      debouncedReviewRef.current = debounce(reviewCode, 800);
+    }
+    return debouncedReviewRef.current;
+  };
+```
+
+The actual `reviewCode` function sends the code to the API and maps the response to Monaco markers:
 
 ```typescript
   const reviewCode = async (codeStr: string, lang: string) => {
@@ -243,7 +254,7 @@ This is the key to making it "real-time" without hammering the API:
       const reviewIssues: ReviewIssue[] = data.issues || [];
       setIssues(reviewIssues);
 
-      // Map AI issues → Monaco editor markers
+      // Map AI issues to Monaco editor markers
       if (editorRef.current && monacoRef.current) {
         const model = editorRef.current.getModel();
         if (model) {
@@ -265,30 +276,19 @@ This is the key to making it "real-time" without hammering the API:
           );
         }
       }
-    } catch { /* silently fail */ }
-    finally { setLoading(false); }
-  };
-
-  // Lazy-init debounced function
-  const getDebouncedReview = () => {
-    if (!debouncedReviewRef.current) {
-      debouncedReviewRef.current = debounce(reviewCode, 800);
+    } catch {
+      // silently fail
+    } finally {
+      setLoading(false);
     }
-    return debouncedReviewRef.current;
   };
 ```
 
-The flow:
-
-```
-User types → handleCodeChange → setCode → debouncedReview (800ms)
-    → POST /api/review → Groq AI → JSON response
-    → setIssues (UI cards) + setModelMarkers (editor squiggles)
-```
+The important part is `setModelMarkers`. This is Monaco's API for adding inline error/warning/info markers. Each marker has a line range, a message (shown on hover), and a severity level. After this call, the editor shows colored squiggles on the problematic lines — exactly like VS Code does for TypeScript errors.
 
 ### The Apply Fix Feature
 
-This uses Monaco's `executeEdits` API to programmatically replace a line:
+This is the feature I'm most proud of. When you click "Apply Fix" on a review card, it replaces the problematic line in the editor:
 
 ```typescript
   const applyFix = (issue: ReviewIssue) => {
@@ -321,22 +321,22 @@ This uses Monaco's `executeEdits` API to programmatically replace a line:
   };
 ```
 
-**Why this works:**
-- `executeEdits` creates an undo-able edit (Ctrl+Z reverts it)
-- `forceMoveMarkers: true` shifts inline markers if the line length changes
-- `revealLineInCenter` scrolls the editor to show the changed line
+`executeEdits` is Monaco's way of making programmatic changes. It takes an edit source string (used for undo grouping) and an array of edits. Each edit has a `range` (what to replace) and `text` (what to replace it with).
 
-### Live Preview with useMemo
+The magic is that `executeEdits` creates an undo entry. If the fix isn't what you wanted, just hit Ctrl+Z. The `forceMoveMarkers: true` flag ensures inline markers shift correctly if the replacement changes the line length.
 
-The preview panel uses `useMemo` to avoid recomputing on every render:
+After the edit, `revealLineInCenter` scrolls the editor to show the changed line, and `setCode` syncs the state.
+
+### Live Preview
+
+For HTML/CSS, the preview renders the raw code in an iframe. For other languages, it shows a formatted code view:
 
 ```typescript
   const previewContent = useMemo(() => {
     if (language === "html") return code;
 
-    const langLabel = LANGUAGES.find(
-      (l) => l.value === language
-    )?.label || language;
+    const langLabel =
+      LANGUAGES.find((l) => l.value === language)?.label || language;
 
     return `<!DOCTYPE html>
 <html><head><style>
@@ -363,22 +363,22 @@ The preview panel uses `useMemo` to avoid recomputing on every render:
   }, [code, language]);
 ```
 
-For HTML/CSS, it renders the raw code in an iframe. For other languages, it shows a formatted code view.
+The `useMemo` is important. Without it, the preview HTML would be recomputed on every render, even if the code hasn't changed. With the dependency array `[code, language]`, it only recomputes when the code or language changes.
 
 ---
 
-## 5. The GitHub PR Bot — Webhook in TypeScript
+## The GitHub PR Bot
 
 This is the most complex piece. It receives GitHub webhook events, parses the diff, runs AI analysis on each file, and posts review comments.
 
 ### Webhook Signature Verification
 
+GitHub signs every webhook with HMAC-SHA256. Without verification, anyone could send fake events to your endpoint:
+
 ```typescript
 // app/api/github/webhook/route.ts
 
 import crypto from "crypto";
-import parseDiff, { File } from "parse-diff";
-import { Octokit } from "@octokit/core";
 
 function verifyWebhookSignature(
   body: string,
@@ -390,7 +390,6 @@ function verifyWebhookSignature(
   const hmac = crypto.createHmac("sha256", secret);
   const digest = `sha256=${hmac.update(body).digest("hex")}`;
 
-  // Timing-safe comparison prevents timing attacks
   return crypto.timingSafeEqual(
     Buffer.from(digest),
     Buffer.from(signature)
@@ -398,7 +397,11 @@ function verifyWebhookSignature(
 }
 ```
 
-### Language Detection from File Extensions
+`crypto.timingSafeEqual` is critical. A regular `===` comparison would be vulnerable to timing attacks — an attacker could measure how long the comparison takes to guess the correct signature character by character. `timingSafeEqual` takes the same amount of time regardless of where the strings differ.
+
+### Language Detection
+
+The PR bot needs to figure out what language each file is written in. It maps file extensions to Monaco language IDs:
 
 ```typescript
 function getLanguageFromExtension(ext: string): string {
@@ -425,9 +428,19 @@ function getLanguageFromExtension(ext: string): string {
 
 ### The Line Number Mapping Problem
 
-This is the hardest part. The AI gives line numbers relative to the *code chunk* (combined added/modified lines). GitHub needs line numbers relative to the *file in the diff*. Here's the mapper:
+This is the hardest part of the entire project. Here's the problem:
+
+The AI receives a "code chunk" — the combined added and modified lines from a file's diff. It returns line numbers relative to that chunk. But GitHub's review API needs line numbers relative to the *actual file in the diff*.
+
+These are not the same thing.
+
+Imagine a diff chunk that starts at line 10 of the file. The AI sees line 1 of the chunk, but GitHub needs line 10. If the chunk skips some lines (context lines), the mapping gets even more complex.
+
+Here's the mapper:
 
 ```typescript
+import { File } from "parse-diff";
+
 function mapAiLineToDiffLine(
   aiLineNumber: number,
   file: File,
@@ -447,7 +460,7 @@ function mapAiLineToDiffLine(
       const change = chunk.changes[indexInChunk];
 
       if (change && "ln" in change && change.ln) {
-        return change.ln;  // Actual file line number
+        return change.ln;
       }
     }
 
@@ -458,16 +471,13 @@ function mapAiLineToDiffLine(
 }
 ```
 
-```
-AI chunk line:     1   2   3   4   5
-                   │   │   │   │   │
-Actual diff line: 10  11  15  16  17   ← These are the lines GitHub needs
-                   │   │   │   │   │
-                   ▼   ▼   ▼   ▼   ▼
-mapAiLineToDiffLine() maps chunk-relative → file-relative
-```
+It walks through the `parseDiff` chunks, tracking the offset. When it finds the chunk containing the AI's line number, it looks up the actual file line number from the change's `ln` property.
 
-### The Main Webhook Handler
+Without this mapping, review comments would land on wrong lines or the GitHub API would reject them with a 422 error.
+
+### The Webhook Handler
+
+The main handler ties everything together:
 
 ```typescript
 export async function POST(req: Request) {
@@ -476,7 +486,7 @@ export async function POST(req: Request) {
     const event = req.headers.get("x-github-event");
     const signature = req.headers.get("x-hub-signature-256");
 
-    // Verify webhook signature
+    // Verify signature
     const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
     if (webhookSecret && webhookSecret !== "your_webhook_secret_here") {
       if (!verifyWebhookSignature(body, signature, webhookSecret)) {
@@ -515,7 +525,7 @@ export async function POST(req: Request) {
         body: string;
       }[] = [];
 
-      // Process each changed file
+      // Process each file with error isolation
       for (const file of parsedFiles) {
         if (file.deleted || !file.to) continue;
 
@@ -534,7 +544,7 @@ export async function POST(req: Request) {
 
           for (const issue of issues) {
             const diffLine = mapAiLineToDiffLine(
-              issue.lineNumber, file, codeChunk
+              issue.number, file, codeChunk
             );
             if (diffLine === null) continue;
 
@@ -559,7 +569,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // Post the review to GitHub
+      // Post the review
       if (allComments.length > 0) {
         await octokit.request(
           "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
@@ -589,86 +599,29 @@ export async function POST(req: Request) {
 }
 ```
 
----
-
-## 6. The Review API Card Component
-
-Each issue renders as a severity-colored card with an Apply Fix button:
-
-```
-┌─────────────────────────────────────────────┐
-│  !  Use const instead of var     WARNING    │
-│                                             │
-│  'var' is function-scoped and can lead      │
-│  to unexpected behavior. Use 'const' or     │
-│  'let' instead.                             │
-│                                             │
-│  Line 4                                     │
-│                                             │
-│  ┌─────────────────────────────────────┐    │
-│  │ const i = 0;                        │    │
-│  └─────────────────────────────────────┘    │
-│                                             │
-│  ┌─────────────────────────────────────┐    │
-│  │           Apply Fix                  │    │
-│  └─────────────────────────────────────┘    │
-└─────────────────────────────────────────────┘
-```
-
-The Apply Fix button appears on hover (`opacity-0 group-hover:opacity-100`) to keep the UI clean.
+The `try/catch` inside the `for` loop is important. If one file's analysis fails (bad syntax, API timeout, whatever), the loop continues to the next file. Without this, one broken file would kill the entire review.
 
 ---
 
-## 7. Tech Stack Summary
+## What I Learned
 
-| Layer | Technology | Why |
-|-------|-----------|-----|
-| Framework | Next.js 16 | App Router, server components, API routes |
-| UI | React 19 + Tailwind CSS 4 | Fast rendering, utility-first styling |
-| Editor | Monaco Editor | Same engine as VS Code |
-| AI | Groq SDK (Llama 3.1) | Sub-second response times |
-| GitHub | Octokit + parse-diff | Type-safe GitHub API |
-| Fonts | Geist + Plus Jakarta Sans | Clean, modern typography |
-| Deploy | Vercel | Zero-config Next.js hosting |
+**1. Start with types, not components.** The `ReviewIssue` interface was the right starting point. It defined the data contract before any UI existed. When I added the GitHub bot later, the same interface worked without changes.
 
----
+**2. `response_format: { type: "json_object" }` changes everything.** Forcing LLMs to return structured JSON eliminates parsing complexity. The alternative — asking for free-form text and parsing it with regex — is fragile and error-prone.
 
-## 8. Getting Started
+**3. Monaco's `executeEdits` is criminally underrated.** Programmatic code editing with undo support, marker preservation, and scroll-to-line. It's the key to the "Apply Fix" feature.
 
-```bash
-# Clone
-git clone https://github.com/doyalnitin/ai-code-reviewer.git
-cd ai-code-reviewer
+**4. Debouncing is not optional.** Without the 800ms debounce, every keystroke fires an API call. With it, the app makes 10-20x fewer calls while the user experience feels identical.
 
-# Install
-npm install
+**5. The line number mapping problem is subtle.** AI line numbers, chunk line numbers, and file line numbers are three different things. Understanding the `parseDiff` data structure is essential.
 
-# Configure
-echo "GROQ_API_KEY=gsk_your_key" > .env.local
-
-# Run
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) and start coding.
+**6. `crypto.timingSafeEqual` should be your default.** Any time you're comparing secrets (webhook signatures, tokens, passwords), use timing-safe comparison. It's 10 extra characters and prevents a real class of attacks.
 
 ---
 
-## What I Learned Building This
+> **Live demo:** [realtime-code-reviewer.vercel.app](https://realtime-code-reviewer.vercel.app)
+> **Source code:** [github.com/doyalnitin/ai-code-reviewer](https://github.com/doyalnitin/ai-code-reviewer)
 
-**1. TypeScript interfaces are your API contract.** The `ReviewIssue` interface defined once flows through AI prompts, API responses, editor markers, and UI components. One type change updates everything.
+If you build something similar, I'd love to hear about it. Open an issue on the repo or find me on Twitter.
 
-**2. Monaco's `executeEdits` is underrated.** Programmatic code editing with undo support, marker preservation, and scroll-to-line — all in one call.
-
-**3. `response_format: { type: "json_object" }` is a game-changer.** Forcing structured output from LLMs eliminates 90% of the parsing complexity.
-
-**4. Debouncing is non-negotiable.** Without the 800ms debounce, every keystroke fires an API call. With it, you get 10-20x fewer calls with the same UX.
-
-**5. The line number mapping problem is subtle.** AI line numbers ≠ diff line numbers ≠ file line numbers. You need to understand the diff format to bridge them.
-
----
-
-> **Try it:** [realtime-code-reviewer.vercel.app](https://realtime-code-reviewer.vercel.app)
-> **Star it:** [github.com/doyalnitin/ai-code-reviewer](https://github.com/doyalnitin/ai-code-reviewer)
-
-*Built with TypeScript, Next.js 16, Monaco Editor, Groq AI, and a lot of type safety.*
+*Built with TypeScript, Next.js 16, Monaco Editor, Groq AI, and strict typing throughout.*
