@@ -1,69 +1,173 @@
 import { NextResponse } from "next/server";
-import parseDiff from "parse-diff";
+import crypto from "crypto";
+import parseDiff, { File } from "parse-diff";
 import { Octokit } from "@octokit/core";
 import { analyzeCode } from "@/lib/reviewer";
 
+function verifyWebhookSignature(
+  body: string,
+  signature: string | null,
+  secret: string
+): boolean {
+  if (!signature) return false;
+  const hmac = crypto.createHmac("sha256", secret);
+  const digest = `sha256=${hmac.update(body).digest("hex")}`;
+  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
+}
+
+function getLanguageFromExtension(ext: string): string {
+  const map: Record<string, string> = {
+    js: "javascript",
+    jsx: "javascript",
+    ts: "typescript",
+    tsx: "typescript",
+    py: "python",
+    cpp: "cpp",
+    cc: "cpp",
+    cxx: "cpp",
+    c: "cpp",
+    h: "cpp",
+    hpp: "cpp",
+    html: "html",
+    htm: "html",
+    css: "css",
+    scss: "css",
+    less: "css",
+  };
+  return map[ext.toLowerCase()] || "javascript";
+}
+
+function mapAiLineToDiffLine(
+  aiLineNumber: number,
+  file: File,
+  codeChunk: string
+): number | null {
+  const chunkLines = codeChunk.split("\n");
+  if (aiLineNumber < 1 || aiLineNumber > chunkLines.length) return null;
+
+  let currentChunkOffset = 0;
+
+  for (const chunk of file.chunks) {
+    const chunkSize = chunk.changes.length;
+    const chunkEnd = currentChunkOffset + chunkSize;
+
+    if (aiLineNumber <= chunkEnd) {
+      const indexInChunk = aiLineNumber - currentChunkOffset - 1;
+      const change = chunk.changes[indexInChunk];
+
+      if (change && "ln" in change && change.ln) {
+        return change.ln;
+      }
+    }
+
+    currentChunkOffset = chunkEnd;
+  }
+
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
-    const payload = await req.json();
+    const body = await req.text();
     const event = req.headers.get("x-github-event");
+    const signature = req.headers.get("x-hub-signature-256");
 
-    // Only trigger when a Pull Request is opened or updated
+    const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (webhookSecret && webhookSecret !== "your_webhook_secret_here") {
+      if (!verifyWebhookSignature(body, signature, webhookSecret)) {
+        console.error("Invalid webhook signature");
+        return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+      }
+    }
+
+    const payload = JSON.parse(body);
+
     if (event === "pull_request" && ["opened", "synchronize"].includes(payload.action)) {
       const pr = payload.pull_request;
       const token = process.env.GITHUB_TOKEN;
 
       if (!token) {
-        console.error("Missing GITHUB_TOKEN in environment variables.");
+        console.error("Missing GITHUB_TOKEN");
         return NextResponse.json({ error: "Missing GITHUB_TOKEN" }, { status: 500 });
       }
 
       const octokit = new Octokit({ auth: token });
 
-      // 1. Fetch the PR Diff from GitHub
       const diffResponse = await fetch(pr.diff_url);
+      if (!diffResponse.ok) {
+        console.error("Failed to fetch PR diff:", diffResponse.status);
+        return NextResponse.json({ error: "Failed to fetch diff" }, { status: 502 });
+      }
       const diffText = await diffResponse.text();
       const parsedFiles = parseDiff(diffText);
 
-      // 2. Iterate through modified files
+      const allComments: { path: string; line: number; body: string }[] = [];
+
       for (const file of parsedFiles) {
         if (file.deleted || !file.to) continue;
 
-        // Combine added/modified lines for analysis
-        const codeChunk = file.chunks
-          .map((c) => c.changes.map((ch) => ch.content).join("\n"))
-          .join("\n");
+        try {
+          const codeChunk = file.chunks
+            .map((c) => c.changes.map((ch) => ch.content).join("\n"))
+            .join("\n");
 
-        if (!codeChunk.trim()) continue;
+          if (!codeChunk.trim()) continue;
 
-        const fileExtension = file.to.split(".").pop() || "javascript";
-        const issues = await analyzeCode(codeChunk, fileExtension);
+          const ext = file.to.split(".").pop() || "js";
+          const language = getLanguageFromExtension(ext);
+          const issues = await analyzeCode(codeChunk, language);
 
-        // 3. Map AI suggestions into GitHub line-by-line review comments
-        if (issues.length > 0) {
-          const comments = issues.map((issue) => ({
-            path: file.to!,
-            line: issue.lineNumber || 1,
-            body: `🤖 **[AI Code Review] ${issue.title}**\n\n${issue.message}\n\n\`\`\`suggestion\n${issue.suggestion}\n\`\`\``,
-          }));
+          for (const issue of issues) {
+            const diffLine = mapAiLineToDiffLine(issue.lineNumber, file, codeChunk);
+            if (diffLine === null) continue;
 
-          // 4. Submit the review to the PR
-          await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
-            owner: payload.repository.owner.login,
-            repo: payload.repository.name,
-            pull_number: pr.number,
-            event: "COMMENT",
-            comments: comments,
-          });
+            allComments.push({
+              path: file.to!,
+              line: diffLine,
+              body: `🤖 **[AI Code Review] ${issue.title}**\n\nSeverity: ${issue.severity}\n\n${issue.message}\n\n\`\`\`suggestion\n${issue.suggestion}\n\`\`\``,
+            });
+          }
+        } catch (fileError) {
+          console.error(`Error processing file ${file.to}:`, fileError);
         }
       }
 
-      return NextResponse.json({ message: "PR Review Completed" });
+      if (allComments.length > 0) {
+        try {
+          await octokit.request(
+            "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+            {
+              owner: payload.repository.owner.login,
+              repo: payload.repository.name,
+              pull_number: pr.number,
+              event: "COMMENT",
+              comments: allComments,
+            }
+          );
+          console.log(`Posted ${allComments.length} review comments`);
+        } catch (apiError: unknown) {
+          const message =
+            apiError instanceof Error ? apiError.message : String(apiError);
+          console.error("Failed to post review:", message);
+          return NextResponse.json(
+            { error: "Failed to post review", details: message },
+            { status: 500 }
+          );
+        }
+      }
+
+      return NextResponse.json({
+        message: "PR Review Completed",
+        commentsPosted: allComments.length,
+      });
     }
 
     return NextResponse.json({ message: "Event ignored" });
   } catch (error) {
     console.error("Webhook processing error:", error);
-    return NextResponse.json({ error: "Webhook processing failed" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Webhook processing failed" },
+      { status: 500 }
+    );
   }
 }
